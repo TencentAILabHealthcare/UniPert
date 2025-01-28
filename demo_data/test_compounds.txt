@@ -1,0 +1,4 @@
+Aspirin	CC(=O)OC1=CC=CC=C1C(=O)O
+Hydrazine	NN
+Adrenaline	CNC[C@@H](C1=CC(=C(C=C1)O)O)O  
+Caffeine	CN1C=NC2=C1C(=O)N(C(=O)N2C)C

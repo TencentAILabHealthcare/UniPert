@@ -1,0 +1,17 @@
+anndata==0.10.6
+biopython==1.83
+ChemSpiPy==2.0.0
+fair-esm==2.0.0
+getSequence==2.2.1
+ipykernel==6.29.3
+jupyter
+lamin_utils==0.13.2
+mmseqs==1.0.0
+numpy==1.24.3
+pandas==1.5.3
+PubChemPy==1.0.4
+rdkit==2023.9.5
+# setuptools==68.2.2
+# torch==1.12.1+cu113
+# torch-geometric==2.5.2
+tqdm
