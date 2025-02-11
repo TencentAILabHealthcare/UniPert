@@ -68,7 +68,10 @@ If you find the models useful in your research, please cite:
 
 ## 📧 Contact
 
-If you have any suggestions/ideas for UniPert or have issues trying to use it, please don't hesitate to reach out to us. You can post an issue or reach us by email(yimingli530@gmail.cn, fionafyang@tencent.com).
+If you have any suggestions/ideas for UniPert or issues while using UniPert, please feel free to reach out to us. You can submit an issue on GitHub or contact us directly via email at:
+	
+- Yiming Li: yimingli530@gmail.com
+- Fan Yang: fionafyang@tencent.com
 
 ## 🚨 License 
 
