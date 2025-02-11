@@ -66,6 +66,10 @@ If you find the models useful in your research, please cite:
 }
 ```
 
+## 📧 Contact
+
+If you have any suggestions/ideas for UniPert or have issues trying to use it, please don't hesitate to reach out to us. You can post an issue or reach us by email(yimingli530@gmail.cn, fionafyang@tencent.com).
+
 ## 🚨 License 
 
 This source code is licensed under the GPL-3.0 license found in the `LICENSE` file
