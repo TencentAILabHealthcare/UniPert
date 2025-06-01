@@ -1,6 +1,6 @@
 # UniPert
 
-![Main Image](https://github.com/user-attachments/assets/cf944fa4-2d23-437f-8708-b8682cd4e0f2)
+![Main Image](https://github.com/user-attachments/assets/8e87b9a5-25f1-48fc-887b-df887d718a4b)
 
 
 ## 🛠️ Installation 
@@ -57,12 +57,13 @@ Install the required dependencies:
 If you find the models useful in your research, please cite:
 
 ```bibtex
-@article{li2025unifying,
-  title={Unifying Genetic and Chemical Perturbagen Representation through a Hybrid Deep Learning Framework},
-  author={Li, Yiming and Zhu, Jun and Liu, Linjing and Wang, Fang and Zeng, Min and Huang, Longkai and Yang, Fan and Li, Min and Yao, Jianhua},
-  journal={bioRxiv},
-  year={2025},
-  publisher={Cold Spring Harbor Laboratory}
+@article {Li2025.02.02.635055,
+  author = {Li, Yiming and Zeng, Min and Zhu, Jun and Liu, Linjing and Wang, Fang and Huang, Longkai and Yang, Fan and Li, Min and Yao, Jianhua},
+  title = {Genetic-to-chemical perturbation transfer learning through unified multimodal molecular representations},
+  elocation-id = {2025.02.02.635055},
+  year = {2025},
+  doi = {10.1101/2025.02.02.635055},
+  publisher = {Cold Spring Harbor Laboratory}
 }
 ```
 
@@ -70,7 +71,7 @@ If you find the models useful in your research, please cite:
 
 If you have any suggestions/ideas for UniPert or issues while using UniPert, please feel free to reach out to us. You can submit an issue on GitHub or contact us directly via email at:
 	
-- Yiming Li: yimingli530@gmail.com
+- Yiming Li: liyiming5@qq.com
 - Fan Yang: fionafyang@tencent.com
 
 ## 🚨 License 
