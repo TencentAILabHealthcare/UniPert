@@ -71,7 +71,7 @@ If you find the models useful in your research, please cite:
 
 If you have any suggestions/ideas for UniPert or issues while using UniPert, please feel free to reach out to us. You can submit an issue on GitHub or contact us directly via email at:
 	
-- Yiming Li: liyiming5@qq.com
+- Yiming Li: liyiming5@qq.com or lym1998@csu.edu.cn
 - Fan Yang: fionafyang@tencent.com
 
 ## 🚨 License 
