@@ -1,6 +1,6 @@
 # UniPert
 
-![Main Image](https://github.com/user-attachments/assets/8e87b9a5-25f1-48fc-887b-df887d718a4b)
+![Main Image](https://github.com/user-attachments/assets/0949007e-af84-4646-9141-232fef965f8d)
 
 
 ## 🛠️ Installation 
@@ -59,7 +59,7 @@ If you find the models useful in your research, please cite:
 ```bibtex
 @article {Li2025.02.02.635055,
   author = {Li, Yiming and Zeng, Min and Zhu, Jun and Liu, Linjing and Wang, Fang and Huang, Longkai and Yang, Fan and Li, Min and Yao, Jianhua},
-  title = {Genetic-to-chemical perturbation transfer learning through unified multimodal molecular representations},
+  title = {Genetic-to-Chemical Perturbation Transfer Learning Through Unified Multimodal Molecular Representations},
   elocation-id = {2025.02.02.635055},
   year = {2025},
   doi = {10.1101/2025.02.02.635055},
