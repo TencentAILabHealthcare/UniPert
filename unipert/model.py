@@ -102,9 +102,6 @@ class UniPert:
             'target_embedder': 'ESM2',
             'compound_embedder': 'ECFP4',
         }
-        if params:
-            params.pop('device', None)
-            self.model_hparams.update(params)
         for key, value in self.model_hparams.items():
             setattr(self, key, value)
         self.model_path = os.path.join(self.save_dir, 'unipert_model.pt')
@@ -167,7 +164,7 @@ class UniPert:
         # Model weights
         model_weights = torch.load(model_path, map_location=self.device)
         # Model hyperparameters
-        self.set_model_hparams(model_weights.pop('hparams'))
+        self.set_model_hparams()
         # Model structure
         unipert_models = self.construct_model()
         unipert_models = unipert_models.to(self.device)
@@ -194,16 +191,16 @@ class UniPert:
         """
         Prepare the compound search service by connecting to either PubChem or ChemSpider.
         """
-        if check_pubchempy():
-            import pubchempy as pcp
-            self.cp_server = pcp
-            self.cp_server_name = 'pubchem'  
-            logger.success(f"pubchempy server connected successfully.")
-        elif check_chemspipy():
+        if check_chemspipy():
             from chemspipy import ChemSpider
             self.cp_server = ChemSpider(os.environ['CHEMSPIDER_APIKEY'])
             self.cp_server_name = 'chemspider'
             logger.success(f"chemspider server connected successfully.")
+        elif check_pubchempy():
+            import pubchempy as pcp
+            self.cp_server = pcp
+            self.cp_server_name = 'pubchem'  
+            logger.success(f"pubchempy server connected successfully.")
         else:
             logger.warning(f"pubchempy or chemspipy service cannot be use! Please check your network connection.")
             self.cp_server = None
@@ -406,10 +403,10 @@ class UniPert:
         reps_path = os.path.join(self.save_dir, 'unipert_reps.pkl')
         if os.path.exists(reps_path):
             unipert_reps = pd.read_pickle(reps_path)
-            self.unipert_reps.update(unipert_reps)       
+            self.unipert_reps.update(unipert_reps)    
             logger.success(f"Referece representations loaded.")
-        else:
-            logger.warning(f"{reps_path} not found.")
+        # else:
+        #     logger.warning(f"{reps_path} not found. Encoding reference targets...")
         
     ### ================= Inference ================= ###
 
@@ -442,14 +439,14 @@ class UniPert:
             tgt_unipert_reps[uniprot_id] = tgt_reps[tgt_names.index(uniprot_id)]
         
         self.unipert_reps.update(tgt_unipert_reps)     
-        logger.success(f"{len(tgt_names)} ref targets encoded.")  
+        logger.success(f"{len(tgt_names)} reference targets encoded.")  
             
         # Save generated UniPert representation
         if save:
             reps_path = os.path.join(self.save_dir, 'unipert_reps.pkl')
             with open(reps_path, 'wb') as f:
                 pickle.dump(self.unipert_reps, f)
-            logger.save(f'Unipert representations saved to {reps_path}.')
+            logger.save(f'UniPert representations saved to {reps_path}.')
 
 
     def enc_gene_ptbgs_from_fasta(

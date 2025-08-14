@@ -196,6 +196,8 @@ def get_cp_sms_from_compound_name(compound_name, server, server_name='pubchem'):
             compound = server.get_compounds(compound_name, 'name')[0]
             is_valid = check_smiles(compound.isomeric_smiles)
             return compound.isomeric_smiles if is_valid else None
+            # is_valid = check_smiles(compound.smiles)
+            # return compound.smiles if is_valid else None
         except:
             logger.print(f"Unable to retrieve SMILES for query compound name: {compound_name}")
             return None 

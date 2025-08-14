@@ -200,7 +200,7 @@ class CompoundEmbedderECFP4:
         self.emb_dim = 2048
         self.ref_emb_file = os.path.join(data_dir, 'ref_ecfp4_embs.pkl')
         self.init_embs_from_saved_pkl()
-        logger.success('ECFP4 embedder loaded.')
+        logger.success('ECFP4 embedder created.')
 
     def init_embs_from_saved_pkl(self):
         if os.path.exists(self.ref_emb_file):

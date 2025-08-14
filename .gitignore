@@ -3,6 +3,10 @@
 .vscode/
 wandb/
 mmseqs_storage/
+demo_data/PapalexiSatija2021_eccite_arrayed_RNA.h5ad
+data/custom_target_seq_similarity.csv
+data/ref_ecfp4_embs.pkl
+data/custom_target_seq.fasta
 
 
 # Byte-compiled / optimized / DLL files
