@@ -163,8 +163,6 @@ class UniPert:
         # Construct and load model
         # Model weights
         model_weights = torch.load(model_path, map_location=self.device)
-        model_weights['hparams']['device'] = self.device
-        model_weights['hparams']['save_dir'] = self.save_dir
         # Model hyperparameters
         self.set_model_hparams()
         # Model structure
