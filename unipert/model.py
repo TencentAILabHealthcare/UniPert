@@ -102,9 +102,6 @@ class UniPert:
             'target_embedder': 'ESM2',
             'compound_embedder': 'ECFP4',
         }
-        if params:
-            params.pop('device', None)
-            self.model_hparams.update(params)
         for key, value in self.model_hparams.items():
             setattr(self, key, value)
         self.model_path = os.path.join(self.save_dir, 'unipert_model.pt')
@@ -169,7 +166,7 @@ class UniPert:
         model_weights['hparams']['device'] = self.device
         model_weights['hparams']['save_dir'] = self.save_dir
         # Model hyperparameters
-        self.set_model_hparams(model_weights.pop('hparams'))
+        self.set_model_hparams()
         # Model structure
         unipert_models = self.construct_model()
         unipert_models = unipert_models.to(self.device)
