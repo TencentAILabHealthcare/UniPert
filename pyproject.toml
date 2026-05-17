@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unipert"
+version = "0.1.0"
+description = "Unified perturbation representation learning framework"
+readme = "README.md"
+requires-python = ">=3.10"
+
+authors = [
+    { name = "Yiming Li", email = "liyiming5@qq.com" }
+]
+
+license = { text = "GPL-3.0" }
+
+dependencies = [
+    "numpy >=1.24,<2 ",
+    "pandas",
+    "scipy",
+    "anndata",
+    "tqdm",
+    "biopython",
+    "lamin_utils == 0.13.2",
+    "fair-esm == 2.0.0",
+    "rdkit == 2023.9.5",
+    "getSequence == 2.2.1",
+    "ChemSpiPy == 2.0.0",
+    "pubchempy >= 1.0.5 ",
+]
+
+[project.optional-dependencies]
+dev = [
+    "jupyter",
+    "ipykernel",
+]
+
+[tool.setuptools]
+packages = ["unipert"]

@@ -1,26 +1,8 @@
 import os
-import random
-import numpy as np
-import torch
+import warnings
 from lamin_utils import logger
-
 from getSequence import getseq
 from rdkit import Chem
-
-from . import *
-
-def setup_seed(random_seed):
-    """
-    Set random seed for reproducibility
-    """
-    random.seed(random_seed)
-    np.random.seed(random_seed)
-    torch.manual_seed(random_seed)
-    torch.cuda.manual_seed(random_seed)
-    torch.cuda.manual_seed_all(random_seed)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
-    os.environ['PYTHONHUSHSEED'] = str(random_seed)
 
 
 class FastaBatchedDataset(object):
@@ -60,9 +42,21 @@ class FastaBatchedDataset(object):
 
         _flush_current_seq()
 
-        assert len(set(sequence_labels)) == len(
-            sequence_labels
-        ), "Found duplicate sequence labels"
+        # assert len(set(sequence_labels)) == len(
+        #     sequence_labels
+        # ), "Found duplicate sequence labels"
+
+        # Remove duplicated sequence labels while preserving order
+        unique_sequences = {}
+        for label, seq in zip(sequence_labels, sequence_strs):
+            if label not in unique_sequences:
+                unique_sequences[label] = seq
+            if label in unique_sequences:
+                if unique_sequences[label] != seq:
+                    logger.warning(f"Duplicate entry with different sequences: {label}")
+
+        sequence_labels = list(unique_sequences.keys())
+        sequence_strs = list(unique_sequences.values())
 
         return cls(sequence_labels, sequence_strs)
 
@@ -102,7 +96,6 @@ def check_smiles(smiles):
             # print(f'Invalid chemistry: {smiles}')
             return False
     return True
-
 
 
 def get_tgt_seq_from_gene_name(gene_name, organism_id='9606'):
@@ -153,23 +146,50 @@ def set_chemspider_key(key):
     os.environ['CHEMSPIDER_APIKEY'] = key
 
 
-def check_chemspipy():
+def check_chemspipy_service():
     try:
         from chemspipy import ChemSpider
-        cs = ChemSpider(os.environ['CHEMSPIDER_APIKEY'])
-        _ = cs.search('glucose')
-        return (cs, 'chemspider')
-    except:
-        return False
+    except ImportError:
+        warnings.warn(
+            "chemspipy is not installed. "
+            "ChemSpider-based compound queries will be unavailable."
+        )
+        return None
+
+    api_key = os.environ.get("CHEMSPIDER_APIKEY")
+    if not api_key:
+        warnings.warn(
+            "CHEMSPIDER_APIKEY is not set. "
+            "Please visit "
+            "https://chemspipy.readthedocs.io/en/stable/guide/intro.html#obtaining-an-api-key",
+            UserWarning,
+        )
+        return None
+
+    try:
+        cs = ChemSpider(api_key)
+        # lightweight connectivity test
+        _ = cs.search("glucose")
+        return cs
+    except Exception as e:
+        warnings.warn(
+            f"ChemSpider service connection failed: {e}",
+            UserWarning,
+        )
+        return None
     
 
-def check_pubchempy():
+def check_pubchempy_service():
     try:
         import pubchempy as pcp
         _ = pcp.get_compounds('glucose', 'name')
-        return pcp, 'pubchem'
-    except:
-        return False
+        return pcp
+    except Exception as e:
+        warnings.warn(
+            f"PubChem service connection failed: {e}",
+            UserWarning,
+        )
+        return None
 
 
 def get_cp_sms_from_compound_name(compound_name, server, server_name='pubchem'):
@@ -183,21 +203,21 @@ def get_cp_sms_from_compound_name(compound_name, server, server_name='pubchem'):
     Returns:
     str: The compound SMILES. Returns None if no match is found.
     """
-    if server_name=='chemspider':
+    if server_name=='pubchem':
         try:
-            compound = server.search(compound_name)[0]
+            compound = server.get_compounds(compound_name, 'name')[0]
+            # is_valid = check_smiles(compound.isomeric_smiles)
+            # return compound.isomeric_smiles if is_valid else None
             is_valid = check_smiles(compound.smiles)
             return compound.smiles if is_valid else None
         except:
             logger.print(f"Unable to retrieve SMILES for query compound name: {compound_name}")
             return None 
-    elif server_name=='pubchem':
+    elif server_name=='chemspider':
         try:
-            compound = server.get_compounds(compound_name, 'name')[0]
-            is_valid = check_smiles(compound.isomeric_smiles)
-            return compound.isomeric_smiles if is_valid else None
-            # is_valid = check_smiles(compound.smiles)
-            # return compound.smiles if is_valid else None
+            compound = server.search(compound_name)[0]
+            is_valid = check_smiles(compound.smiles)
+            return compound.smiles if is_valid else None
         except:
             logger.print(f"Unable to retrieve SMILES for query compound name: {compound_name}")
             return None 

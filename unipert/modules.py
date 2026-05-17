@@ -1,3 +1,4 @@
+import os
 import copy
 import pickle
 import numpy as np
@@ -8,10 +9,11 @@ import torch
 import torch.nn as nn
 from torch_geometric.nn import BatchNorm, GCNConv, LayerNorm, Sequential
 
+from rdkit import Chem
 from rdkit.Chem import AllChem
 from getSequence import getseq
 
-from .utils import *
+from .utils import FastaBatchedDataset, check_smiles
 from . import DATA_DIR
 
 
@@ -200,7 +202,7 @@ class CompoundEmbedderECFP4:
         self.emb_dim = 2048
         self.ref_emb_file = os.path.join(data_dir, 'ref_ecfp4_embs.pkl')
         self.init_embs_from_saved_pkl()
-        logger.success('ECFP4 embedder created.')
+        # logger.success('ECFP4 embedder created.')
 
     def init_embs_from_saved_pkl(self):
         if os.path.exists(self.ref_emb_file):
@@ -379,7 +381,7 @@ class TargetEmbedderESM2:
         self.model = None
         self.load_model()
         self.init_embs_from_saved_pkl()
-        logger.success('ESM2 embedder created.')
+        # logger.success('ESM2 embedder created.')
 
     def load_model(self):
         """Load the ESM2 model and its alphabet."""
@@ -407,7 +409,7 @@ class TargetEmbedderESM2:
         if os.path.exists(self.ref_emb_file):
             ref_reps = pd.read_pickle(self.ref_emb_file)
             self.saved_embs.update(ref_reps)
-            logger.download(f'Reference ESM2 embedding file loaded.')
+            logger.download(f'Reference ESM2 embedding loaded.')
         else:
             logger.warning(f'Reference ESM2 embedding file [{self.ref_emb_file}] not found.') 
             logger.info(f'A new reference ESM2 embedding file will be created.')
@@ -570,6 +572,6 @@ class TargetEmbedderESM2:
                     out_embs.update({uniprot_id: emb})
             if ('PN=' not in header) and ('|' in header):
                 out_embs.update({header: emb}) 
-        logger.success(f'ESM2 embeddings with {len(out_embs)} querys generated.')
+        # logger.success(f'ESM2 embeddings with {len(out_embs)} querys generated.')
         if save: self.update_saved_pkl(out_embs)
         return out_embs

@@ -4,6 +4,9 @@
 wandb/
 mmseqs_storage/
 demo_data/PapalexiSatija2021_eccite_arrayed_RNA.h5ad
+demo_data/SrivatsanTrapnell2020_sciplex3.h5ad
+demo_data/test_compounds.xlsx
+data/custom_compound_smiles.txt
 data/custom_target_seq_similarity.csv
 data/ref_ecfp4_embs.pkl
 data/custom_target_seq.fasta

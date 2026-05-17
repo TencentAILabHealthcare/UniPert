@@ -2,11 +2,11 @@ from typing import List, Tuple, Optional
 import pickle
 import anndata
 import pandas as pd
+import subprocess
 from tqdm import tqdm
 from collections import defaultdict
 from lamin_utils import logger, colors
 
-import mmseqs
 from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
@@ -22,7 +22,7 @@ from . import DATA_DIR, MODEL_DIR, MMSEQS_CACHE_DIR
 
 
 class UniPert:
-    def __init__(self, data_dir: str = DATA_DIR, model_dir: str = MODEL_DIR):
+    def __init__(self, data_dir: str = DATA_DIR, model_dir: str = MODEL_DIR, model_name='unipert_model.pt'):
         """
         Initialize the UniPert model with specified data and model directories.
 
@@ -30,8 +30,10 @@ class UniPert:
             data_dir (str, optional): The directory where data files are located. Defaults to DATA_DIR.
             model_dir (str, optional): The directory where the model files are stored. Defaults to MODEL_DIR.
         """
-        # Data
+        # Paths
         self.data_dir = data_dir
+        self.model_dir = model_dir
+        self.mmseqs_cache_dir = MMSEQS_CACHE_DIR
 
         # Device
         if torch.cuda.is_available() and torch.version.cuda:
@@ -39,62 +41,56 @@ class UniPert:
             logger.info("CUDA is available. Using CUDA.")
         else:
             self.device = torch.device('cpu')
-            logger.info("CUDA is not available or not properly installed. Using CPU instead.")
-
-        # MMseqs tool
-        self.client = None
+            logger.info("CUDA is not available. Using CPU instead.")
 
         # Compound search service
-        self.cp_server = None
+        self.compound_search_service = None
+        self.compound_search_service_name = None
 
         # Reference target graph information
-        self.ref_target_seq_file = os.path.join(data_dir, 'ref_target_seq.fasta')
-        self.ref_target_sim_file = os.path.join(data_dir, 'ref_target_seq_similarity.csv')
+        self.ref_target_seq_file = os.path.join(self.data_dir, 'ref_target_seq.fasta')
+        self.ref_target_sim_file = os.path.join(self.data_dir, 'ref_target_seq_similarity.csv')
         self.ref_target = None
         self.ref_target_sim = None
         self.ref_target_graph = None
 
         # Custom target graph information
-        self.custom_target_seq_file = os.path.join(data_dir, 'custom_target_seq.fasta')
-        self.custom_target_sim_file = os.path.join(data_dir, 'custom_target_seq_similarity.csv')
+        self.custom_target_seq_file = os.path.join(self.data_dir, 'custom_target_seq.fasta')
+        self.custom_target_sim_file = os.path.join(self.data_dir, 'custom_target_seq_similarity.csv')
         self.custom_target = None
         self.custom_target_sim = None
         self.custom_target_graph = None
         self.custom_target_ui2pn = defaultdict(list)     # {UniProt_id: [perturbagen_names]}
 
-        # Reference-custom target graph node ID mapping 
+        # Graph node ID mapping 
         self.node_name2id = None
 
-        # Custom compound information
-        self.custom_compound_smiles_file = os.path.join(data_dir, 'custom_compound_smiles.txt')
+        # Custom compound cache
+        self.custom_compound_smiles_file = os.path.join(self.data_dir, 'custom_compound_smiles.txt')
 
-        # Check if model is already trained at the given path, load model
-        self.loaded = False
+        # UniPert representation cache
+        self.unipert_reps = {}    
+        self.ref_target_encoded = False
+
+        # Load pretrained model
+        self.model_loaded = False
         try:
-            self.load_models(save_dir=model_dir)
-            self.loaded = True
+            self.load_model(model_dir=model_dir, model_name=model_name)
+            self.model_loaded = True
         except FileNotFoundError:
-            logger.error(f"Model have not found at [{model_dir}]. Please download the trained model file [unipert_model.pt].")
+            logger.error(f"Model not found at [{model_dir}]. Please download [{model_name}].")
 
         # Prepare reference graph  
-        self.prepare_ref_target_graph() 
+        self._prepare_ref_target_graph() 
         
-        # Saved UniPert representations
-        self.unipert_reps = {}    
-
-        # Loaded
-        if self.loaded: logger.success(colors.green(f"Model loaded and initialized."))
+        # Initialization complete
+        if self.model_loaded: logger.success(colors.green(f"Model loaded and initialized."))
 
 
     def set_model_hparams(self, params: Optional[dict] = None):
         """
-        Set the hyperparameters for the model.
-
-        Args:
-            params (dict, optional): A dictionary of hyperparameters to update the model's settings.
+        Initialize UniPert model configuration.
         """
-        # Model hyperparameters
-        self.save_dir = MODEL_DIR
         self.model_hparams = {
             'out_dim': 256,
             'gnn_type': 'GCN',
@@ -104,17 +100,16 @@ class UniPert:
         }
         for key, value in self.model_hparams.items():
             setattr(self, key, value)
-        self.model_path = os.path.join(self.save_dir, 'unipert_model.pt')
         
 
-    def construct_model(self) -> nn.ModuleList:
+    def _build_model(self) -> nn.ModuleList:
         """
-        Construct the UniPert model architecture.
+        Build the UniPert model architecture.
 
         Returns:
-            nn.ModuleList: A list of constructed UniPert models including compound and target models.
+            nn.ModuleList: A list of Builded UniPert models including compound and target models.
         """
-        logger.info(colors.yellow(f"Constructing UniPert model..."))
+        logger.info(colors.yellow(f"Building UniPert model..."))
 
         # Prepare embedders
         self.tgt_embedder = TargetEmbedderESM2(data_dir=self.data_dir, device=self.device)
@@ -123,15 +118,8 @@ class UniPert:
         self.cp_embs = None
 
         # Prepare UniPert model
-        self.cp_model = CompoundEncoder(
-            embedder=self.cp_embedder, 
-            output_dim=self.out_dim
-            )
-        self.tgt_encoder = GNN_Encoder(
-            layer_sizes=[self.tgt_embedder.emb_dim]+[self.out_dim]*self.layer_num, 
-            gnn_type=self.gnn_type, 
-            batchnorm=True
-            )
+        self.cp_model = CompoundEncoder(embedder=self.cp_embedder, output_dim=self.out_dim)
+        self.tgt_encoder = GNN_Encoder(layer_sizes=[self.tgt_embedder.emb_dim]+[self.out_dim]*self.layer_num, gnn_type=self.gnn_type, batchnorm=True)
         self.tgt_predictor = MLP_Predictor(self.out_dim, self.out_dim, hidden_size=self.out_dim*4)
         self.tgt_model = BGRL(self.tgt_encoder, self.tgt_predictor)
         
@@ -139,106 +127,143 @@ class UniPert:
         unipert_models.append(self.cp_model)
         unipert_models.append(self.tgt_model)
 
-        logger.success(f"UniPert model constructed.")
+        logger.success(f"UniPert model architecture initialized.")
         return unipert_models
 
 
-    def load_models(
-            self, 
-            save_dir: Optional[str] = None, 
+    def load_model(
+            self,
+            model_dir: Optional[str] = None,
+            model_name: str = 'unipert_model.pt',
     ):
         """
-        Load the pre-trained models from the specified directory.
+        Load pretrained UniPert model weights.
 
         Args:
-            save_dir (str, optional): The directory from which to load the model.
+            model_dir:Directory containing pretrained model weights.
+            model_name:Name of the model checkpoint file.
         """
-        # Define model saved path
-        if not save_dir:
-            model_path = os.path.join(self.save_dir, 'unipert_model.pt')
-        else:
-            self.save_dir = save_dir
-            model_path = os.path.join(save_dir, 'unipert_model.pt')
+        # Resolve model checkpoint path
+        model_dir = model_dir if model_dir is not None else self.model_dir
+        model_path = os.path.join(model_dir, model_name)
 
-        # Construct and load model
-        # Model weights
-        model_weights = torch.load(model_path, map_location=self.device)
-        # Model hyperparameters
+        # Load model weights
+        model_weights = torch.load(model_path,map_location=self.device,weights_only=True)
+
+        # Initialize model configuration
         self.set_model_hparams()
-        # Model structure
-        unipert_models = self.construct_model()
+
+        # Build model architecture
+        unipert_models = self._build_model()
         unipert_models = unipert_models.to(self.device)
-        logger.download(f"Pretrained model file loaded.")
+
+        # Load pretrained weights
         self.cp_model.load_state_dict(model_weights['cp_encoder'])
         self.tgt_encoder.load_state_dict(model_weights['tgt_encoder'])
+
+        logger.download("Pretrained UniPert model loaded.")
             
 
-    def prepare_mmseqs(self):
+    def _prepare_mmseqs_database(self):
         """
-        Prepare the MMseqs client and create a reference database.
+        Initialize the MMseqs2 reference database.
         """
-        logger.info('Preparing MMseqs and creating reference database...')
+        logger.info('Initialize the MMseqs2 reference database...')
         import shutil
-        if os.path.exists(MMSEQS_CACHE_DIR):
-            shutil.rmtree(MMSEQS_CACHE_DIR)
-        os.makedirs(MMSEQS_CACHE_DIR)  
-        self.client = mmseqs.MMSeqs(storage_directory=MMSEQS_CACHE_DIR)
-        self.client.databases.create('ref', 'ref genome-wide protein database', self.ref_target_seq_file)
+
+        # Reset MMseqs cache directory
+        if os.path.exists(self.mmseqs_cache_dir):
+            shutil.rmtree(self.mmseqs_cache_dir)
+        os.makedirs(self.mmseqs_cache_dir, exist_ok=True)  
+        
+        # Create MMseqs reference database
+        ref_db_path = os.path.join(self.mmseqs_cache_dir, 'ref')
+        subprocess.run(["mmseqs", "createdb", self.ref_target_seq_file, ref_db_path], check=True)
+
         logger.success('MMseqs reference database created.')
 
 
-    def prepare_cp_server(self):
+    def _initialize_compound_search_service(self):
         """
-        Prepare the compound search service by connecting to either PubChem or ChemSpider.
+        Initialize compound search services using PubChem or ChemSpider.
         """
-        if check_chemspipy():
-            from chemspipy import ChemSpider
-            self.cp_server = ChemSpider(os.environ['CHEMSPIDER_APIKEY'])
-            self.cp_server_name = 'chemspider'
-            logger.success(f"chemspider server connected successfully.")
-        elif check_pubchempy():
-            import pubchempy as pcp
-            self.cp_server = pcp
-            self.cp_server_name = 'pubchem'  
-            logger.success(f"pubchempy server connected successfully.")
-        else:
-            logger.warning(f"pubchempy or chemspipy service cannot be use! Please check your network connection.")
-            self.cp_server = None
-            self.cp_server_name = None
+        # Try PubChem
+        pubchem_service = check_pubchempy_service()
+        if pubchem_service:
+            # import pubchempy as pcp
+            self.compound_search_service = pubchem_service
+            self.compound_search_service_name = 'pubchem'  
+            logger.success(f"PubChem service initialized successfully.")
+            return
+
+        # Try ChemSpider
+        chemspider_service = check_chemspipy_service()
+        if chemspider_service:
+            # from chemspipy import ChemSpider
+            self.compound_search_service = chemspider_service
+            self.compound_search_service_name = 'chemspider'
+            logger.success(f"chemspider server initialized successfully.")
+            return
+
+        logger.warning(f"No compound search service is available! Please check your network connection.")
+        self.compound_search_service = None
+        self.compound_search_service_name = None
 
 
-    def cal_similarity_from_fasta(
+    def _compute_sequence_similarity(
             self, 
             custom_seq_fasta: Optional[str] = None, 
             save_sim_file: bool = True
     ):
         """
-        Calculate the similarity between custom sequences and a reference FASTA file.
+        Compute the similarity between custom sequences and a reference FASTA file.
 
         Args:
             custom_seq_fasta (str, optional): The path to the custom FASTA file. If provided, it will be used for similarity calculation.
             save_sim_file (bool, optional): Whether to save the similarity results to a CSV file. Defaults to True.
         """
-        # Prepare the mmseqs client
-        if self.client is None: 
-            self.prepare_mmseqs()
+        # Prepare MMseqs2 reference database
+        ref_db_path = os.path.join(self.mmseqs_cache_dir, 'ref')
+        if not os.path.exists(ref_db_path): 
+            self._prepare_mmseqs_database()
 
-        # Define the custom target sequence file
+        # Set custom target sequence FASTA file
         if custom_seq_fasta is not None:
             self.custom_target_seq_file = custom_seq_fasta
             # self.custom_target_sim_file = self.custom_target_seq_file.replace('.fasta', '_similarity.csv')
 
-        # Extract unique IDs of custom target sequences from the fasta file
+        # Extract unique IDs of custom target sequences
         self.custom_target = list(set([seq_record.id.split('|')[1] for seq_record in SeqIO.parse(self.custom_target_seq_file, "fasta")]))
 
-        # Use the mmseqs client to calculate similarity
-        logger.info(f'Calculating similarity between {self.custom_target_seq_file} and reference fasta file...')
-        results = self.client.databases[0].search_file(
-                self.custom_target_seq_file, 
-                search_type="protein",
-                headers=["query_sequence_id", "target_sequence_id", "sequence_identity"]
-                )
-        self.custom_target_sim = results.dataframe
+        logger.info(f'Computing similarities between {self.custom_target_seq_file} and reference sequences...')
+
+        # Run MMseqs2 with search commond
+        # Define MMseqs2 working paths
+        query_db_path = os.path.join(self.mmseqs_cache_dir, 'query')
+        result_db_path = os.path.join(self.mmseqs_cache_dir, 'result')
+        tmp_dir = os.path.join(self.mmseqs_cache_dir, 'tmp')
+        aln_result = os.path.join(self.mmseqs_cache_dir, 'alnResult.m8')
+        
+        # Clean previous MMseqs2 outputs to avoid FileExistsError
+        import glob
+        import shutil
+        for f in glob.glob(f"{query_db_path}*") + glob.glob(f"{result_db_path}*"):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        if os.path.exists(tmp_dir): shutil.rmtree(tmp_dir)
+        
+        # Run MMseqs2
+        subprocess.run(["mmseqs", "createdb", self.custom_target_seq_file, query_db_path], check=True)
+        subprocess.run(["mmseqs", "search", query_db_path, ref_db_path, result_db_path, tmp_dir, "-a"], check=True)
+        subprocess.run(["mmseqs", "convertalis", query_db_path, ref_db_path, result_db_path, aln_result, "--format-output", "query,target,nident,alnlen,fident", "--format-mode", "4"], check=True)
+        
+        result_df = pd.read_csv(aln_result, sep='\t')
+        result_df["fident_exact"] = (result_df["nident"]/result_df["alnlen"])
+        sim_df = result_df.loc[:, ["query", "target", "fident_exact"]]
+        sim_df.to_csv(self.custom_target_sim_file, header=None, index=False)
+        self.custom_target_sim = sim_df
 
         # If required, save the similarity results to a CSV file
         if save_sim_file:
@@ -246,7 +271,7 @@ class UniPert:
             logger.save(f"MMseqs2 results saved to {self.custom_target_sim_file}")
 
 
-    def prepare_ref_target_graph(self):
+    def _prepare_ref_target_graph(self):
         """
         Prepare the reference target graph by loading or constructing it from the specified sequence file.
 
@@ -261,21 +286,23 @@ class UniPert:
             logger.download(f"Reference target graph prepared.")
             return
         
-        # Check if the reference target sequence file exists
+        # Check if the reference target sequence FASTA file exists
         if not os.path.exists(self.ref_target_seq_file):
-            logger.error(f"{self.ref_target_seq_file} does not found. Please download it first.")
-            raise ValueError(f'{self.ref_target_seq_file} not found.')
+            raise FileNotFoundError(
+                f"Reference sequence file not found: "
+                f"{self.ref_target_seq_file}"
+            )
 
         # Prepare graph edges if similarity data is not available
         if self.ref_target_sim is None:
             if not os.path.exists(self.ref_target_sim_file):
-                self.cal_similarity_from_fasta(self.ref_target_seq_file)
+                self._compute_sequence_similarity(self.ref_target_seq_file)
 
-        # Load the similarity data
+        # Load similarity table
         self.ref_target_sim = pd.read_csv(self.ref_target_sim_file, header=None).drop_duplicates()
         edge_info_df = self.ref_target_sim.copy()
 
-        # Get graph node names (UniProt IDs) from the reference sequence file
+        # Extract graph node names (UniProt IDs) from the reference sequence file
         self.ref_target = list(set([seq_record.id.split('|')[1] for seq_record in SeqIO.parse(self.ref_target_seq_file, "fasta")]))
 
         # Generate graph node embeddings if not already available
@@ -296,39 +323,39 @@ class UniPert:
         edge_weight = torch.tensor(edge_info_df.iloc[:, 2].values, dtype=torch.float)
         edge_index, edge_weight = add_self_loops(edge_index, edge_weight, num_nodes=len(node_names))
 
-        # Create the reference target graph
+        # Build the reference target graph object
         self.ref_target_graph = Data(x=x, edge_index=edge_index, edge_attr=edge_weight).to(self.device)
         self.ref_target_graph.node_names = node_names    # UniProt accessions
 
         logger.success(f"Reference target graph prepared.")
 
 
-    def construct_custom_target_graph(
+    def _build_custom_target_graph(
             self, 
             custom_seq_fasta: Optional[str] = None
     ):
         """
-        Construct a custom target graph based on the provided custom sequence FASTA file.
+        Build a custom target graph from input custom sequence FASTA file.
 
         Args:
-            custom_seq_fasta (str, optional): The path to the custom FASTA file used to construct the target graph.
+            custom_seq_fasta (str, optional): Path to the custom FASTA file.
         """
-        logger.info(f'Constructing reference-custom target graph from {custom_seq_fasta}...')
+        logger.info(f'Building reference-custom target graph from {custom_seq_fasta} ...')
 
-        # Prepare graph edges by calculating similarity from the fasta file
-        self.cal_similarity_from_fasta(custom_seq_fasta)
+        # Compute sequence similarity
+        self._compute_sequence_similarity(custom_seq_fasta)
         edge_info_df = self.custom_target_sim.copy()
 
-        # Prepare graph node embeddings from the custom target sequence file
+        # Prepare graph node embeddings
         custom_embs = self.tgt_embedder.get_embs_from_fasta(self.custom_target_seq_file)
         self.tgt_embs.update(custom_embs)
         node_feature_df = pd.DataFrame(self.tgt_embs).T
 
-        # Generate node name and ID mapping dictionary for new nodes
+        # Add new nodes to mapping
         new_nodes = list(set(self.custom_target) - set(self.ref_target))
         self.node_name2id.update({name: i+len(self.ref_target) for i, name in enumerate(new_nodes)})
 
-        # Map the edge information to the new node IDs
+        # Map node names to node ids
         edge_info_df.iloc[:, 0] = edge_info_df.iloc[:, 0].map(self.node_name2id)
         edge_info_df.iloc[:, 1] = edge_info_df.iloc[:, 1].map(self.node_name2id)
 
@@ -339,193 +366,160 @@ class UniPert:
         edge_weight = torch.tensor(edge_info_df.iloc[:, 2].values, dtype=torch.float).to(self.device)
         edge_weight = torch.concat((self.ref_target_graph.edge_attr, edge_weight), dim=0)
 
-        # Add self-loops to the graph
+        # Add self-loops
         edge_index, edge_weight = add_self_loops(edge_index, edge_weight, num_nodes=len(self.ref_target+new_nodes))
 
-        # Create the custom target graph
+        # Build custom target graph object
         self.custom_target_graph = Data(x=x, edge_index=edge_index, edge_attr=edge_weight).to(self.device)
         self.custom_target_graph.node_names = self.ref_target+new_nodes    # uniprot accession
 
         # logger.success(f"Reference-custom target graph created with {len(self.custom_target_graph.node_names)} nodes and {edge_weight.shape[0]} edges.")
 
-    
-    def cp_pertId2smiles_mapping(
-            self, 
-            csv_file: str,
-            key_column_name: str = 'pert_id',
-             value_column_name: str = 'canonical_smiles'
-    ) -> dict:
-        """
-        Map perturbagen IDs to their corresponding SMILES representations from a CSV file.
 
-        Args:
-            csv_file (str): The path to the CSV file containing perturbation information.
-            key_column_name (str, optional): The column name for perturbation IDs. Defaults to 'pert_id'.
-            value_column_name (str, optional): The column name for SMILES representations. Defaults to 'canonical_smiles'.
-
-        Returns:
-            dict: A dictionary mapping perturbation IDs to their corresponding SMILES.
-        """
-        # Read the CSV file and filter out rows without PubChem CID
-        # key_column_name, value_column_name = 'pert_id', 'canonical_smiles'
-        df = pd.read_csv(csv_file).dropna(subset=['pubchem_cid']).loc[:, [key_column_name, value_column_name]].drop_duplicates()
-        df = df[df[value_column_name]!='restricted']
-        return dict(zip(df[key_column_name], df[value_column_name]))
-
-
-    def tgt_symbol2uniprot_mapping(
+    def _load_gene_to_uniprot_mapping(
             self, 
             csv_file: str, 
-            key_column_name: str = 'Approved symbol',
-            value_column_name: str = 'UniProt accession'
+            gene_column: str = 'Approved symbol',
+            uniprot_column: str = 'UniProt accession'
     ) -> dict:
         """
         Map target symbols to their corresponding UniProt accessions from a CSV file.
 
         Args:
             csv_file (str): The path to the CSV file containing target information.
-            key_column_name (str, optional): The column name for target symbols. Defaults to 'Approved symbol'.
-            value_column_name (str, optional): The column name for UniProt accessions. Defaults to 'UniProt accession'.
+            gene_column (str, optional): The column name for target symbols. Defaults to 'Approved symbol'.
+            uniprot_column (str, optional): The column name for UniProt accessions. Defaults to 'UniProt accession'.
 
         Returns:
             dict: A dictionary mapping target symbols to their corresponding UniProt accessions.
         """
-        df = pd.read_csv(csv_file).dropna(subset=[key_column_name, value_column_name]).loc[:, [key_column_name, value_column_name]].drop_duplicates()
-        return dict(zip(df[key_column_name], df[value_column_name]))
+        df = pd.read_csv(csv_file).dropna(subset=[gene_column, uniprot_column]).loc[:, [gene_column, uniprot_column]].drop_duplicates()
+        return dict(zip(df[gene_column], df[uniprot_column]))
 
 
     def load_unipert_reps(self):
         """
-        Load UniPert representations from a pickle file.
-
-        This method checks if the representations file exists and updates the current representations.
+        Load cached UniPert representations from disk.
         """
-        reps_path = os.path.join(self.save_dir, 'unipert_reps.pkl')
+        reps_path = os.path.join(self.model_dir,'unipert_reps.pkl')
         if os.path.exists(reps_path):
-            unipert_reps = pd.read_pickle(reps_path)
-            self.unipert_reps.update(unipert_reps)    
-            logger.success(f"Referece representations loaded.")
-        # else:
-        #     logger.warning(f"{reps_path} not found. Encoding reference targets...")
-        
-    ### ================= Inference ================= ###
+            with open(reps_path, "rb") as f:
+                cached_unipert_reps = pickle.load(f)
+            self.unipert_reps.update(cached_unipert_reps)
+            logger.success(f"Loaded cached referece UniPert representations.")
 
-    def encode_ref_perturbagens(
+    def _save_reps(
+            self,
+            reps: dict,
+            save_path: str,
+    ):
+        with open(save_path, "wb") as f:
+            pickle.dump(reps, f)
+        logger.save(f"UniPert representations saved to {save_path}.")
+
+    ### ================= Application ================= ###
+
+    def _encode_ref_targets(
             self, 
             save: bool = False
     ):
         """
         Encode reference perturbagens and update the UniPert representations.
-
-        Args:
-            save (bool, optional): Whether to save the updated representations to a file. Defaults to False.
         """
+        if self.ref_target_encoded: return
+
         tgt_ptbg_info_file = os.path.join(self.data_dir, 'ref_targets.csv')
-        self.cp_model.eval()
         self.tgt_encoder.eval()
 
         # Map perturbation IDs
-        tgt_symbol2uniprot_dict = self.tgt_symbol2uniprot_mapping(tgt_ptbg_info_file)  # 'cmap_name' -> 'uniprot accession'
+        tgt_symbol2uniprot_dict = self._load_gene_to_uniprot_mapping(tgt_ptbg_info_file)  # 'cmap_name' -> 'uniprot accession'
 
         # Encode genetic perturbagens
-        tgt_unipert_reps = {}
         tgt_names = self.ref_target_graph.node_names   # uniprot accession
+        tgt_index = {name:idx for idx, name in enumerate(tgt_names)}
         tgt_reps = self.tgt_encoder(self.ref_target_graph.to(self.device)).detach().cpu().numpy() 
         assert len(tgt_names) == tgt_reps.shape[0]
+        tgt_unipert_reps = {}
         for gene_symbol, uniprot_id in tgt_symbol2uniprot_dict.items():
             self.tgt_embedder.saved_embs[gene_symbol] = self.tgt_embedder.saved_embs[uniprot_id]
-            tgt_unipert_reps[gene_symbol] = tgt_reps[tgt_names.index(uniprot_id)]
+            tgt_unipert_reps[gene_symbol] = tgt_reps[tgt_index[uniprot_id]]
         for uniprot_id in tgt_names:
-            tgt_unipert_reps[uniprot_id] = tgt_reps[tgt_names.index(uniprot_id)]
+            tgt_unipert_reps[uniprot_id] = tgt_reps[tgt_index[uniprot_id]]
         
-        self.unipert_reps.update(tgt_unipert_reps)     
-        logger.success(f"{len(tgt_names)} reference targets encoded.")  
-            
-        # Save generated UniPert representation
-        if save:
-            reps_path = os.path.join(self.save_dir, 'unipert_reps.pkl')
-            with open(reps_path, 'wb') as f:
-                pickle.dump(self.unipert_reps, f)
-            logger.save(f'UniPert representations saved to {reps_path}.')
+        self.unipert_reps.update(tgt_unipert_reps)    
+        self.ref_target_encoded = True
+        logger.info(f"{len(tgt_names)} reference targets encoded.")  
 
 
-    def enc_gene_ptbgs_from_fasta(
+    def _encode_genes_from_fasta(
             self, 
-            custom_seq_fasta: Optional[str] = None,
-            save: bool = False
+            fasta_file: str,
     ) -> dict:
         """
-        Encode genetic perturbagens from a provided FASTA file.
+        Encode genetic perturbagens from FASTA file.
 
         Args:
             fasta_file (str, optional): The path to the custom FASTA file containing genetic perturbagens.
-            save (bool, optional): Whether to save the updated representations to a file. Defaults to False.
 
         Returns:
             dict: A dictionary of encoded genetic perturbagens.
         """
-        assert custom_seq_fasta is not None, "Please provide a fasta file."
+
         self.tgt_encoder.eval()
 
         # Prepare data by constructing the custom target graph
-        self.construct_custom_target_graph(custom_seq_fasta)
+        self._build_custom_target_graph(fasta_file)
         self.custom_target_graph = self.custom_target_graph.to(self.device)
 
         # Encode genetic perturbagens
-        custom_target_reps = {}
         tgt_names = self.custom_target_graph.node_names    # uniprot accession
+        tgt_index = {name:idx for idx, name in enumerate(tgt_names)}
         tgt_reps = self.tgt_encoder(self.custom_target_graph).detach().cpu().numpy() 
+        assert len(tgt_names) == tgt_reps.shape[0]          
 
-        assert len(tgt_names) == tgt_reps.shape[0]          # Ensure names match representations
+        custom_target_reps = {}
         for tgt_uid in self.custom_target:
+            rep = tgt_reps[tgt_index[tgt_uid]]
             if tgt_uid in self.custom_target_ui2pn.keys():
                 pns = self.custom_target_ui2pn[tgt_uid]
                 for pn in pns:
-                    custom_target_reps[pn] = tgt_reps[tgt_names.index(tgt_uid)]
+                    custom_target_reps[pn] = rep
             else:
-                custom_target_reps[tgt_uid] = tgt_reps[tgt_names.index(tgt_uid)]
+                custom_target_reps[tgt_uid] = rep
         self.unipert_reps.update(custom_target_reps)
 
-        # Save representations if required
-        if save:
-            save_dir = os.path.join(self.save_dir, f'unipert_reps.pkl')
-            with open(save_dir, 'wb') as f:
-                pickle.dump(self.unipert_reps, f)
-            logger.save(f'Custom perturbagen representations saved at {save_dir}.')
-        return custom_target_reps
+        return custom_target_reps, []
 
 
-    def enc_gene_ptbgs_from_gene_names(
+    def _encode_genes_from_gene_names(
             self, 
             gene_names: List[str], 
-            save: bool = False
     ) -> Tuple[dict, list]:
         """
         Encode genetic perturbagens based on provided gene names.
 
         Args:
             gene_names (list): A list of gene names to encode.
-            save (bool, optional): Whether to save the updated representations to a file. Defaults to False.
 
         Returns:
             tuple: A tuple containing a dictionary of encoded perturbagens and a list of invalid inputs.
         """
         if not gene_names:
-            logger.warning("gene_names is empty, skipping operation.")
-            return
+            logger.warning("gene_names is empty.")
+            return {}, []
 
-        self.load_unipert_reps()
-        self.encode_ref_perturbagens()
+        # self.load_unipert_reps()
+        self._encode_ref_targets()
         gene_names = list(set(gene_names))
         out_reps = {}
         invalid_inputs = []
         records = []
         logger.info(f"Encoding {len(gene_names)} genetic perturbagens with UniPert...")
         for gene in tqdm(gene_names):
-            if gene in list(self.unipert_reps.keys()):
+            if gene in self.unipert_reps:
                 out_reps[gene] = self.unipert_reps[gene]
                 continue
-            if gene.upper() in list(self.unipert_reps.keys()):
+            if gene.upper() in self.unipert_reps:
                 out_reps[gene] = self.unipert_reps[gene.upper()]
                 continue
             proid_seq = get_tgt_seq_from_gene_name(gene)   # [uniprot_id, head, seq]
@@ -540,57 +534,43 @@ class UniPert:
                 invalid_inputs.append(gene)
 
         # Write to FASTA file if records exist
-        if records != []:
+        if records:
             SeqIO.write(records, self.custom_target_seq_file, "fasta")
-            reps = self.enc_gene_ptbgs_from_fasta(
-                self.custom_target_seq_file,
-                save=False
-                )
-            out_reps.update(reps)
+            new_reps, _ = self._encode_genes_from_fasta(self.custom_target_seq_file)
+            out_reps.update(new_reps)
 
-        # Save representations if required
-        if save:
-            reps_path = os.path.join(self.save_dir, f'unipert_reps.pkl')
-            self.unipert_reps.update(out_reps)
-            with open(reps_path, 'wb') as f:
-                pickle.dump(self.unipert_reps, f)
-            logger.save(f'Custom perturbagen representations saved at {reps_path}.')
-
-        logger.success(f"{len(out_reps)} encoded succesfully, {len(invalid_inputs)} failed.")
         return out_reps, invalid_inputs
     
 
-    def enc_gene_ptbgs_from_uniprot_accessions(
+    def _encode_genes_from_uniprot_ids(
             self, 
             uniprot_accessions: List[str],  
-            save: bool = False
     ) -> Tuple[dict, list]:  
         """
         Encode genetic perturbagens based on provided UniProt accessions.
 
         Args:
             uniprot_accessions (list): A list of UniProt accessions to encode.
-            save (bool, optional): Whether to save the updated representations to a file. Defaults to False.
 
         Returns:
             tuple: A tuple containing a dictionary of encoded perturbations and a list of invalid inputs.
         """
         if not uniprot_accessions:
-            logger.warning("uniprot_accessions is empty, skipping operation.")
-            return
+            logger.warning("uniprot_accessions is empty.")
+            return {}, []
 
-        self.load_unipert_reps()
-        self.encode_ref_perturbagens()
+        # self.load_unipert_reps()
+        self._encode_ref_targets()
         uniprot_accessions = list(set(uniprot_accessions))
         out_reps = {}
         invalid_inputs = []
         records = []
         logger.info(f"Encoding {len(uniprot_accessions)} genetic perturbagens with UniPert...")
         for query_ua in tqdm(uniprot_accessions):
-            if query_ua in list(self.unipert_reps.keys()):
+            if query_ua in self.unipert_reps:
                 out_reps[query_ua] = self.unipert_reps[query_ua]
                 continue
-            if query_ua.upper() in list(self.unipert_reps.keys()):
+            if query_ua.upper() in self.unipert_reps:
                 out_reps[query_ua] = self.unipert_reps[query_ua.upper()]
                 continue
             proid_seq = get_tgt_seq_from_uniprot_accession(query_ua)   # [uniprot_id, head, seq]
@@ -607,23 +587,16 @@ class UniPert:
        # Write to FASTA file if records exist
         if records != []:
             SeqIO.write(records, self.custom_target_seq_file, "fasta")
-            reps = self.encode_genetic_perturbagens_from_fasta(
+            new_reps = self.encode_genetic_perturbagens_from_fasta(
                 self.custom_target_seq_file,
                 save=False
                 )
-            out_reps.update(reps)
+            out_reps.update(new_reps)
 
-        # Save representations if required
-        if save:
-            reps_path = os.path.join(self.save_dir, f'unipert_reps.pkl')
-            self.unipert_reps.update(out_reps)
-            with open(reps_path, 'wb') as f:
-                pickle.dump(self.unipert_reps, f)
-            logger.save(f'Custom perturbagen representations saved at {reps_path}.')
         return out_reps, invalid_inputs
         
 
-    def enc_chem_ptbgs_from_smiles(
+    def _encode_compounds_from_smiles(
             self, 
             smiles_list: List[str],
             save: bool = False
@@ -638,6 +611,8 @@ class UniPert:
         Returns:
             dict: A dictionary of encoded chemical perturbations.
         """
+        logger.info(f"Encoding {len(smiles_list)} chemcial perturbagens with UniPert...")
+
         # Get SMILES embedder
         self.cp_model.eval()
         unembedded_sms = [s for s in smiles_list if s not in self.cp_model.embedder.saved_embs.keys()]
@@ -656,18 +631,10 @@ class UniPert:
             custom_compound_reps[sm] = cp_reps[i]
         self.unipert_reps.update(custom_compound_reps)
 
-        # Save representations if required
-        if save:
-            save_dir = os.path.join(self.save_dir, f'unipert_reps.pkl')
-            with open(save_dir, 'wb') as f:
-                pickle.dump(self.unipert_reps, f)
-            logger.save(f'Custom perturbagen representations saved at {save_dir}.')
-
-        logger.success(f"{len(custom_compound_reps)} encoded succesfully.")
         return custom_compound_reps
 
 
-    def enc_chem_ptbgs_from_sms_csv(
+    def _encode_compounds_from_csv(
             self, 
             custom_cp_sms_csv: str, 
             cp_col_name: str = 'Compound', 
@@ -681,11 +648,11 @@ class UniPert:
             custom_cp_sms_csv (str): The path to the CSV file containing compound and SMILES data.
             cp_col_name (str, optional): The column name for compound names. Defaults to 'Compound'.
             sms_col_name (str, optional): The column name for SMILES representations. Defaults to 'SMILES'.
-            save (bool, optional): Whether to save the updated representations to a file. Defaults to False.
 
         Returns:
             dict: A dictionary of encoded chemical perturbations.
         """
+
         self.cp_model.eval()
 
         # Get compound and SMILES data
@@ -698,6 +665,8 @@ class UniPert:
         cp_sms_df = cp_sms_df[cp_sms_df['is_valid']==True]
         compound_lists = cp_sms_df[cp_col_name].tolist()
         smiles_list = cp_sms_df[sms_col_name].tolist()
+
+        logger.info(f"Encoding {len(smiles_list)} chemcial perturbagens with UniPert...")
 
         # Get SMILES embedder
         _ = self.cp_model.embedder.get_emb_from_smiles_list(smiles_list)
@@ -715,31 +684,24 @@ class UniPert:
         
         self.unipert_reps.update(custom_compound_reps)
 
-        # Save representations if required
-        if save:
-            save_dir = os.path.join(self.save_dir, f'perturbagen_reps.pkl')
-            with open(save_dir, 'wb') as f:
-                pickle.dump(self.unipert_reps, f)
-            print(f'Custom perturbagen representations saved at {save_dir}.')
-        
         return custom_compound_reps, []
     
 
-    def enc_chem_ptbgs_from_dict(
+    def _encode_compounds_from_dict(
             self, 
             cp_sms_dict: str, 
-            save: bool = False
     ) -> dict:
         """
         Encode chemical perturbations from a dict with keys of compound names and values of SMILES information.
 
         Args:
             cp_sms_dict (dict): A dictionary containing compound names as keys and SMILES as values.
-            save (bool, optional): Whether to save the updated representations to a file. Defaults to False.
 
         Returns:
             dict: A dictionary of encoded chemical perturbations and invalid SMILES.
         """
+
+        logger.info(f"Encoding {len(cp_sms_dict)} chemcial perturbagens with UniPert...")
 
         self.cp_model.eval()
 
@@ -771,17 +733,10 @@ class UniPert:
         
         self.unipert_reps.update(custom_compound_reps)
 
-        # Save representations if required
-        if save:
-            save_dir = os.path.join(self.save_dir, f'perturbagen_reps.pkl')
-            with open(save_dir, 'wb') as f:
-                pickle.dump(self.unipert_reps, f)
-            print(f'Custom perturbagen representations saved at {save_dir}.')
-
         return custom_compound_reps, invalid_cps
     
 
-    def enc_chem_ptbgs_from_compound_names(
+    def _encode_compounds_from_names(
             self, 
             compound_names: List[str], 
             save: bool = False
@@ -791,7 +746,6 @@ class UniPert:
 
         Args:
             compound_names (list): A list of compound names to encode. 
-            save (bool, optional): Whether to save the updated representations to a file. Defaults to False.
 
         Returns:
             dict: A dictionary of encoded chemical perturbations and invalid SMILES.
@@ -802,17 +756,20 @@ class UniPert:
         # Validate input
         if not isinstance(compound_names, list) or not compound_names:
             raise ValueError("compound_names must be a non-empty list.")
+
+        logger.info(f"Encoding {len(compound_names)} chemcial perturbagens with UniPert...")
         
         # Check API 
-        if not self.cp_server: self.prepare_cp_server()
-        if not self.cp_server: return {}, compound_names
+        if not self.compound_search_service: self._initialize_compound_search_service()
+        if not self.compound_search_service: return {}, compound_names
 
         # Retrieve SMILES
         invalid_cps = []
         smiles_list = []
         compound_lists = []
-        for cp in compound_names: 
-            sms = get_cp_sms_from_compound_name(cp, server=self.cp_server, server_name=self.cp_server_name)  
+        logger.info(f"Retrievaling SMILES for chemical perturbagens...")
+        for cp in tqdm(compound_names): 
+            sms = get_cp_sms_from_compound_name(cp, server=self.compound_search_service, server_name=self.compound_search_service_name)  
             if sms and check_smiles(sms):
                 smiles_list.append(sms)
                 compound_lists.append(cp)
@@ -835,31 +792,127 @@ class UniPert:
         
         self.unipert_reps.update(custom_compound_reps)
 
-        # Save representations if required
-        if save:
-            save_dir = os.path.join(self.save_dir, f'perturbagen_reps.pkl')
-            with open(save_dir, 'wb') as f:
-                pickle.dump(self.unipert_reps, f)
-            print(f'Custom perturbagen representations saved at {save_dir}.')
-
         return custom_compound_reps, invalid_cps
 
 
-    def enc_ptbgs_for_pert_adata(
+### ================= public API facade ================= ###
+
+    def encode_genes(
+            self,
+            gene_names: Optional[List[str]] = None,
+            uniprot_ids: Optional[List[str]] = None,
+            fasta_file: Optional[str] = None,
+            save_path: Optional[str] = None
+    ) -> Tuple[dict, list]:
+        """
+        Encode genetic perturbations into UniPert representations.
+
+        Args:
+            gene_names: List of gene symbols.
+            uniprot_ids: List of UniProt accessions.
+            fasta_file: FASTA file containing protein sequences.
+            save: Whether to save generated representations.
+            save_path: Output path for saved representations.
+
+        Returns:
+            Tuple of:
+                - encoded representations
+                - invalid inputs
+        """
+
+        input_count = sum([
+            gene_names is not None,
+            uniprot_ids is not None,
+            fasta_file is not None,
+        ])
+
+        if input_count != 1:
+            raise ValueError(
+                "Exactly one of "
+                "`gene_names`, "
+                "`uniprot_ids`, or "
+                "`fasta_file` "
+                "must be provided."
+            )
+
+        if gene_names is not None:
+            encoded_reps, invalid_inputs = self._encode_genes_from_gene_names(gene_names=gene_names)
+        elif uniprot_ids is not None:
+            encoded_reps, invalid_inputs = self._encode_genes_from_uniprot_ids(uniprot_accessions=uniprot_ids)
+        else:
+            encoded_reps, invalid_inputs = self._encode_genes_from_fasta(fasta_file=fasta_file)
+
+        if save_path is not None:
+            self._save_reps(reps=encoded_reps,save_path=save_path)
+
+        return encoded_reps, invalid_inputs
+
+
+    def encode_compounds(
+            self,
+            compound_names: Optional[List[str]] = None,
+            compound_dict: Optional[dict] = None,
+            csv_file: Optional[str] = None,
+            smiles_list: Optional[List[str]] = None,
+            save_path: Optional[str] = None
+    ):
+        """
+        Encode chemical perturbations into UniPert representations.
+
+        Args:
+            compound_names: List of compound names.
+            compound_dict: Dictionary mapping compound names to SMILES.
+            csv_file: CSV file containing compound/SMILES mappings.
+            smiles_list: List of SMILES strings.
+            save_path: Output path for saved representations.
+
+        Returns:
+            Encoded representations and invalid inputs.
+        """
+
+        input_count = sum([
+            compound_names is not None,
+            compound_dict is not None,
+            csv_file is not None,
+            smiles_list is not None,
+        ])
+
+        if input_count != 1:
+            raise ValueError(
+                "Exactly one compound input source "
+                "must be provided."
+            )
+
+        if compound_names is not None:
+            encoded_reps, invalid_inputs =  self._encode_compounds_from_names(compound_names=compound_names)
+        elif compound_dict is not None:
+            encoded_reps, invalid_inputs = self._encode_compounds_from_dict(cp_sms_dict=compound_dict)
+        elif csv_file is not None:
+            return self._encode_compounds_from_csv(csv_file=csv_file)
+        else:
+            encoded_reps, invalid_inputs = self._encode_compounds_from_smiles(smiles_list=smiles_list)
+
+        if save_path is not None:
+            self._save_reps(reps=encoded_reps,save_path=save_path)
+
+        return encoded_reps, invalid_inputs
+
+
+    def encode_anndata_perturbations(
             self,
             adata: anndata.AnnData,  
-            ptbg_cols: List[str] = ['perturbation'],  
-            ptbg_types: Optional[List[str]] = None, 
+            perturbation_columns: List[str] = ['perturbation'],  
+            perturbation_types: List[str] = ['genetic'], 
             control_key: str = 'control',
             return_results: bool = False
     )-> dict:
         """
-        Generate embeddings for perturbagens based on the given AnnData object.
+        Generate embeddings for perturbation reagents (perturbagens) based on the given AnnData object.
 
         Args:
             adata (anndata.AnnData): A required AnnData object containing perturbation information.
-            ptbg_cols (list of str): Required list of adata.obs.column names indicating perturbagen info.
-            ptbg_types (list of str, optional): An optional list of strings indicating the type of each perturbation key. Valid types include 'genetic' and 'chemical'.
+            perturbation_columns (list of str): Required list of adata.obs.column names indicating perturbagen info.
+            perturbation_types (list of str): An list of strings indicating the type of each perturbation key. Valid types include 'genetic' and 'chemical'.
             control_key (str, optional): The key used to identify control perturbations. Defaults to 'control'.
             return_results (bool, optional): Whether to return the results as a dictionary. Defaults to False.
 
@@ -869,97 +922,53 @@ class UniPert:
         # adata = adata.copy()
 
         valid_types = ['genetic', 'chemical']
-        if not isinstance(ptbg_cols, list) or not isinstance(ptbg_types, list):
-            raise ValueError("ptbg_keys and ptbg_types must be list")
-        elif len(ptbg_cols) != len(ptbg_types):
-            raise ValueError("ptbg_keys and ptbg_types must have the same length")
-        elif any(t not in valid_types for t in ptbg_types):
-            raise ValueError("ptbg_types must be 'genetic' or 'chemical'")
+        if len(perturbation_columns) != len(perturbation_types):
+            raise ValueError("perturbation_columns and perturbation_types must have the same length")
+        elif any(t not in valid_types for t in perturbation_types):
+            raise ValueError("Supported perturbation types: 'genetic' or 'chemical'")
         
         genetic_ptbgs = []
         chemical_ptbgs = []
         invalid_ptbgs = []
 
-        for key, typ in zip(ptbg_cols, ptbg_types):
-            if key not in adata.obs.columns:
-                raise ValueError(f"{key} not found in adata.obs.columns")
-            else:
-                ptbgs = list(adata.obs.dropna(subset=[key])[key].unique())
-                if control_key in ptbgs: ptbgs.remove(control_key)
-                if typ == 'genetic':
-                    genetic_ptbgs.extend(ptbgs)
-                elif typ == 'chemical':
-                    chemical_ptbgs.extend(ptbgs)    
+        for col, typ in zip(perturbation_columns, perturbation_types):
+            if col not in adata.obs.columns:
+                raise ValueError(f"{col} not found in adata.obs")
+            ptbgs = adata.obs[col].dropna().unique().tolist()
+            ptbgs = [ptbg for ptbg in ptbgs if ptbg != control_key]
+            if typ == 'genetic':
+                genetic_ptbgs.extend(ptbgs)
+            elif typ == 'chemical':
+                chemical_ptbgs.extend(ptbgs)    
 
-        unipert_embs = {}
+        unipert_reps = {}
+        invalid_ptbgs = []
+
         # Encode genetic perturbagens
-        if genetic_ptbgs != []:
+        if genetic_ptbgs:
             genetic_ptbgs = list(set(genetic_ptbgs))
-            records = []
-            logger.info(f"Retrieving sequence for genetic perturbagens...")
-            for gene in tqdm(genetic_ptbgs):
-                if gene in self.unipert_reps.keys():
-                    unipert_embs[gene] = self.unipert_reps[gene]
-                    continue
-                proid_seq = get_tgt_seq_from_gene_name(gene)   # [uniprot_id, head, seq]
-                if proid_seq:
-                    self.custom_target_ui2pn[proid_seq[0]].append(gene)
-                    rec = SeqRecord(Seq(proid_seq[2]), 
-                                    id=proid_seq[1], 
-                                    description=f'PN={gene}'    # pert name
-                                    )
-                    records.append(rec) 
-                else:
-                    invalid_ptbgs.append(gene)
-                    
-            if records:
-                # Write to FASTA file
-                # records = list(set(records))
-                SeqIO.write(records, self.custom_target_seq_file, "fasta")
-                genetic_ptbg_embs = self.enc_gene_ptbgs_from_fasta(
-                    self.custom_target_seq_file,
-                    save=False
-                    )
-                unipert_embs.update(genetic_ptbg_embs)
+            # logger.info(f"Encoding {len(genetic_ptbgs)} genetic perturbagens...")
+            gene_ptbg_reps, invalid_genes = self.encode_genes(gene_names=genetic_ptbgs)
+            unipert_reps.update(gene_ptbg_reps)
+            invalid_ptbgs.extend(invalid_genes)
 
         # Encode chemical perturbagens
-        chemical_ptbg_embs = None
-        if chemical_ptbgs != []:
-            if not self.cp_server: 
-                self.prepare_cp_server()
+        if chemical_ptbgs:
             chemical_ptbgs = list(set(chemical_ptbgs))
-            cp_sms = {}
-            logger.info("Retrievaling SMILES for chemical perturbagens...")
-            for compound in tqdm(chemical_ptbgs):
-                if compound in self.unipert_reps.keys():
-                    unipert_embs[compound] = self.unipert_reps[compound]
-                    continue
-                sms = get_cp_sms_from_compound_name(compound, server=self.cp_server, server_name=self.cp_server_name)
-                if sms:
-                    cp_sms[compound] = sms
-                else:
-                    invalid_ptbgs.append(compound)
-            
-            if cp_sms:
-                # Transfer chemical SMILES (dict) to DataFrame and write to CSV file
-                chemical_ptbg_df = pd.DataFrame(list(cp_sms.items()), columns=['Compound', 'SMILES'])
-                chemical_ptbg_df.to_csv(self.custom_compound_smiles_file, index=False)
-                chemical_ptbg_embs, _ = self.enc_chem_ptbgs_from_sms_csv(
-                    self.custom_compound_smiles_file, 
-                    cp_col_name='Compound', 
-                    sms_col_name='SMILES',
-                    save=False
-                    )
-                unipert_embs.update(chemical_ptbg_embs)
+            # logger.info(f"Encoding {len(chemical_ptbgs)} chemical perturbagens...")
+            chem_ptbg_reps, invalid_compounds = self.encode_compounds(compound_names=chemical_ptbgs)
+            unipert_reps.update(chem_ptbg_reps)
+            invalid_ptbgs.extend(invalid_compounds)
 
         # Save UniPert embeddings to adata.uns['UniPert_reps']
-        adata.uns['UniPert_reps'] = unipert_embs
+        adata.uns['UniPert_reps'] = unipert_reps
         adata.uns['invalid_ptbgs'] = invalid_ptbgs
+
         logger.success(colors.green(f'UniPert representations generated!'))
-        logger.info(f"{len(unipert_embs)} perturbagens' UniPert representations saved to adata.uns['UniPert_reps']")
+        logger.info(f"{len(unipert_reps)} perturbagens' UniPert representations saved to adata.uns['UniPert_reps']")
         
         if invalid_ptbgs:
             logger.warning(f"{len(invalid_ptbgs)} perturbagens can not be repersentated and saved to adata.uns['invalid_ptbgs']: \n{invalid_ptbgs}")
 
         if return_results:
-            return {'UniPert_reps': unipert_embs, 'invalid_ptbgs': invalid_ptbgs}
+            return {'UniPert_reps': unipert_reps, 'invalid_ptbgs': invalid_ptbgs}
