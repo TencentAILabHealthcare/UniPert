@@ -47,11 +47,11 @@ mmseqs --help
 #### Step 5: Install UniPert
 #### Option 1: Install directly from GitHub
 ```bash
-pip install git+https://github.com/TencentAILabHealthcare/UniPert.git
+pip install git+https://github.com/lynn-1998/UniPert
 ```
 #### Option 2: Install from source
 ```bash
-git clone https://github.com/TencentAILabHealthcare/UniPert.git
+git clone https://github.com/lynn-1998/UniPert
 cd UniPert
 pip install -e .
 ```
