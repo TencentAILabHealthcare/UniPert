@@ -233,7 +233,7 @@ class UniPert:
             # self.custom_target_sim_file = self.custom_target_seq_file.replace('.fasta', '_similarity.csv')
 
         # Extract unique IDs of custom target sequences
-        self.custom_target = list(set([seq_record.id.split('|')[1] for seq_record in SeqIO.parse(self.custom_target_seq_file, "fasta")]))
+        self.custom_target = list(set([seq_record.id.split('|')[1] if '|' in seq_record.id else seq_record.id for seq_record in SeqIO.parse(self.custom_target_seq_file, "fasta")]))
 
         logger.info(f'Computing similarities between {self.custom_target_seq_file} and reference sequences...')
 
